@@ -5,6 +5,7 @@ import torch
 import torch.utils.data
 import numpy as np
 from librosa.util import normalize
+from pathlib import Path
 from scipy.io.wavfile import read
 from librosa.filters import mel as librosa_mel_fn
 
@@ -74,12 +75,23 @@ def mel_spectrogram(y, n_fft, num_mels, sampling_rate, hop_size, win_size, fmin,
 
 def get_dataset_filelist(a):
     with open(a.input_training_file, 'r', encoding='utf-8') as fi:
-        training_files = [os.path.join(a.input_wavs_dir, x.split('|')[0] + '.wav')
-                          for x in fi.read().split('\n') if len(x) > 0]
+        training_files = []
+        for x in fi.read().split('\n'):
+            if len(x) == 0:
+                continue
+            bn = Path(x.split('|')[0]).with_suffix('.wav')
+            speaker = Path(x.split('|')[1])
+            training_files.append(Path(a.input_wavs_dir) / speaker / bn)
 
     with open(a.input_validation_file, 'r', encoding='utf-8') as fi:
-        validation_files = [os.path.join(a.input_wavs_dir, x.split('|')[0] + '.wav')
-                            for x in fi.read().split('\n') if len(x) > 0]
+        validation_files = []
+        for x in fi.read().split('\n'):
+            if len(x) == 0:
+                continue
+            bn = Path(x.split('|')[0]).with_suffix('.wav')
+            speaker = Path(x.split('|')[1])
+            validation_files.append(Path(a.input_wavs_dir) / speaker / bn)
+
     return training_files, validation_files
 
 
@@ -109,9 +121,22 @@ class MelDataset(torch.utils.data.Dataset):
         self.base_mels_path = base_mels_path
 
     def __getitem__(self, index):
-        filename = self.audio_files[index]
+        while True:
+            filename = self.audio_files[index]
+            mel_path = (Path(self.base_mels_path) / Path(filename).parent.stem / Path(filename).stem).with_suffix('.npy')
+            if os.path.exists(filename) and os.path.exists(mel_path):
+                break
+
+            print(f'No {filename} or {mel_path}')
+            index = random.randint(0, len(self.audio_files))
+
         if self._cache_ref_count == 0:
-            audio, sampling_rate = load_wav(filename)
+            try:
+                audio, sampling_rate = load_wav(filename)
+            except:
+                answer = self.__getitem__((index + 1) % len(self.audio_files))
+                # print(answer)
+                return answer
             audio = audio / MAX_WAV_VALUE
             if not self.fine_tuning:
                 audio = normalize(audio) * 0.95
@@ -140,8 +165,14 @@ class MelDataset(torch.utils.data.Dataset):
                                   self.sampling_rate, self.hop_size, self.win_size, self.fmin, self.fmax,
                                   center=False)
         else:
-            mel = np.load(
-                os.path.join(self.base_mels_path, os.path.splitext(os.path.split(filename)[-1])[0] + '.npy'))
+            try:
+                mel = np.load(mel_path)
+            except:
+                print('Not found file: ', mel_path)
+                answer = self.__getitem__((index + 1) % len(self.audio_files))
+                # print(answer)
+                return answer
+
             mel = torch.from_numpy(mel)
 
             if len(mel.shape) < 3:
@@ -162,7 +193,7 @@ class MelDataset(torch.utils.data.Dataset):
                                    self.sampling_rate, self.hop_size, self.win_size, self.fmin, self.fmax_loss,
                                    center=False)
 
-        return (mel.squeeze(), audio.squeeze(0), filename, mel_loss.squeeze())
+        return (mel.squeeze(), audio.squeeze(0), 0, mel_loss.squeeze())
 
     def __len__(self):
         return len(self.audio_files)
